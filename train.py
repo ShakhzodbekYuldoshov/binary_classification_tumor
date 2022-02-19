@@ -1,94 +1,236 @@
-# Import required libraries
-from get_model import get_model
 import tensorflow as tf
+import random
 import numpy as np
-import matplotlib.pyplot as plt
 import os
-from tensorflow.keras.preprocessing.image import ImageDataGenerator
-from tensorflow.keras.applications.vgg16 import preprocess_input
-from tensorflow.keras.metrics import Precision, Recall
+import sys
+import resnet
+import parser
+import load_data
+import eval_
+
+BASEDIR = os.path.join(os.path.dirname(__file__))
 
 
-train_datagen = tf.keras.preprocessing.image.ImageDataGenerator(
-    preprocessing_function=tf.keras.applications.resnet50.preprocess_input)
+# get argument
+args = parser.train_parser()
 
-train_datagen = ImageDataGenerator(preprocessing_function=preprocess_input)
-test_datagen = ImageDataGenerator(preprocessing_function=preprocess_input)
-train_generator = train_datagen.flow_from_directory('./dataset/train',
-                                                    target_size=(224, 224),
-                                                    color_mode='rgb',
-                                                    batch_size=32,
-                                                    class_mode='binary',
-                                                    shuffle=True)
-test_generator = test_datagen.flow_from_directory('./dataset/test',
-                                                  target_size=(224, 224),
-                                                  color_mode='rgb',
-                                                  batch_size=32,
-                                                  class_mode='binary',
-                                                  shuffle=True)
+# standard output format
+SPACE = 35
 
-model = get_model(tf)
+# default: resnet_v2_101
+RESNET_V2 = 'resnet_v2_' + args.layers
+# default: ./pretrain_models/resnet_v2_101.ckpt'
+RESNET_V2_CKPT_PATH = BASEDIR+'/pretrain_models/'+RESNET_V2+'.ckpt'
+# default: 12
+CLASSES = args.classes
+# default: 16
+BATCH_SIZE = args.batch
+# default: 0.001
+LR = args.lr
+# default: 300
+EPOCH = args.epoch
+# default: True
+PRETRAIN = args.pretrain
+# defalut: 1
+SAVE_STEP = args.save
+# defalut: -1
+RESTORE_TARGET = args.recover
+# defalut: False
+ADD_VAL = args.val
 
-checkpoint_path = "training_3/cp.ckpt"
-model.load_weights(checkpoint_path)
+# restore weights path
+BASE_MODEL_DIR = os.path.join(BASEDIR + "/models/" + RESNET_V2)
+RESTORE_CKPT_PATH = os.path.join(BASE_MODEL_DIR, "/model_", str(RESTORE_TARGET) + ".ckpt")
+if RESTORE_TARGET == -1:
+    if not os.path.exists(BASE_MODEL_DIR):
+        try:
+            os.mkdir('models')
+            os.mkdir('models/' + RESNET_V2)
+        except FileExistsError as err:
+            print('directors exists')
+elif not os.path.isfile(RESTORE_CKPT_PATH + ".index"):
+    print("Recover target not found.")
+    sys.exit()
+SIZE = None
+WIDTH = 224
+HEIGHT = 224
+# learning decay step
+# default: 300
+DECAY_STEP = 300
+# learning rate decay rate
+# default: 0.1
+DECAY_RATE = 0.1
+# staircase
+# default: False
+STAIRCASE = False
 
-print(model.summary())
 
-for layer in model.layers[:175]:
-    layer.trainable = False
+KEY = tf.GraphKeys.GLOBAL_VARIABLES
 
-es_callback = tf.keras.callbacks.EarlyStopping(
-    monitor='loss', min_delta=0, patience=0, verbose=0,
-    mode='auto', baseline=None, restore_best_weights=True
-)
 
-# save model
-checkpoint_path = "training_4/cp.ckpt"
-checkpoint_dir = os.path.dirname(checkpoint_path)
+# augmentation
+def augmentation(img):
+    img_ = []
+    size_ = img.shape[0]
+    for i in range(size_):
+        h, w = img[i].shape[0:2]
+        # random crop
+        shift1 = random.randint(0, h-HEIGHT)
+        shift2 = random.randint(0, w-WIDTH)
+        img_.append(img[i][shift1:HEIGHT+shift1, shift2:WIDTH+shift2][:])
+        # flip
+        if random.randint(0, 1) == 0:
+            img_[i] = np.flip(img_[i], 1)
+    return img_
 
-# Create a callback that saves the model's weights
-cp_callback = tf.keras.callbacks.ModelCheckpoint(filepath=checkpoint_path,
-                                                 save_weights_only=True,
-                                                 verbose=1)
 
-model.compile(optimizer='sgd', loss='sparse_categorical_crossentropy',
-              metrics=['accuracy'])
+# crop center 224*224
+def crop_center(img):
+    img_ = []
+    size_ = img.shape[0]
+    for i in range(size_):
+        h, w = img[i].shape[0:2]
+        # random crop
+        shift1 = int((h-HEIGHT)/2)
+        shift2 = int((w-WIDTH)/2)
+        img_.append(img[i][shift1:HEIGHT+shift1, shift2:WIDTH+shift2][:])
+    return np.asarray(img_)
 
-# draw model metrics
-history = model.fit_generator(
-    generator=train_generator, 
-    steps_per_epoch=train_generator.n//train_generator.batch_size, 
-    epochs=20,
-    callbacks=[cp_callback, es_callback])
 
-print(history.history.keys())
-acc = history.history['acc']
-loss = history.history['loss']
-plt.figure()
-plt.plot(acc, label='Training Accuracy')
-plt.ylabel('Accuracy')
-plt.title('Training Accuracy')
-plt.figure()
-plt.plot(loss, label='Training Loss')
-plt.ylabel('Loss')
-plt.title('Training Loss')
-plt.xlabel('epoch')
-plt.show()
+def net_(xp, yp, is_train, global_step):
+    x = xp
+    # create network
+    net = resnet.resnet(x, RESNET_V2, is_train, CLASSES)
+    # squeeze
+    net = tf.squeeze(net, axis=(1, 2))
 
-# evaluate the model
-Testresults = model.evaluate(test_generator)
-print("test loss, test acc:", Testresults)
+    # to one hot
+    y = tf.one_hot(yp, depth=CLASSES)
 
-predictions = model.predict(test_generator, batch_size=None, verbose=0, steps=None, callbacks=None)
-print(predictions)
+    # define loss
+    loss = tf.reduce_mean(
+            tf.nn.softmax_cross_entropy_with_logits_v2(logits=net, labels=y))
 
-classes = np.argmax(predictions, axis = 1)
-print(classes)
-print(test_generator.labels)
+    lr = tf.train.exponential_decay(LR, global_step, DECAY_STEP, DECAY_RATE,
+                                    STAIRCASE)
 
-x=test_generator[5]
-predictions = model.predict(x) 
-print('First prediction:', predictions[0])
-category = np.argmax(predictions[0], axis = 0)
-print("the image class is:", category)
+    # get pretrain variable
+    var_pre = tf.get_collection('pretrain')
+    # get non-pretrain variable
+    var_non = list(set(tf.global_variables()) - set(var_pre))
+    # operations for batch normalization
+    update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
+    with tf.variable_scope('optimizer'):
+        # batch normalization operations added as a dependency
+        with tf.control_dependencies(update_ops):
+            if PRETRAIN or RESTORE_TARGET != -1:
+                # set different learning rate
+                opt_pre = tf.train.AdamOptimizer(
+                        learning_rate=lr*0.5).minimize(loss, var_list=var_pre)
+                opt_non = tf.train.AdamOptimizer(
+                        learning_rate=lr).minimize(loss, var_list=var_non)
+                opt = tf.group(opt_pre, opt_non)
+            else:
+                opt = tf.train.AdamOptimizer(learning_rate=lr).minimize(loss)
 
+    prediction = tf.argmax(net, axis=1)
+
+    return prediction, opt, loss
+
+
+def train_net(x_train, y_train, x_val, y_val):
+    # set placeholder
+    xp = tf.placeholder(tf.float32, shape=(None, HEIGHT, WIDTH, 3))
+    yp = tf.placeholder(tf.int32, shape=(None))
+    is_train = tf.placeholder(tf.bool)
+    global_step = tf.placeholder(tf.int32)
+    # get network
+    prediction, opt, loss = net_(xp, yp, is_train, global_step)
+    best_epoch = 0
+    best_acc = 0
+    with tf.Session() as sess:
+        if PRETRAIN:
+            # get pretrain variable
+            var_to_restore = tf.get_collection('pretrain')
+            # get non-pretrain restore
+            var = list(set(tf.global_variables()) - set(var_to_restore))
+            # setup restorer
+            restorer = tf.train.Saver(var_to_restore)
+            # restore weights
+            restorer.restore(sess, RESNET_V2_CKPT_PATH)
+            # initial non-pretrain variables
+            init = tf.variables_initializer(var)
+            sess.run(init)
+        elif RESTORE_TARGET != -1:
+            # setup saver
+            restorer = tf.train.Saver()
+            # load weight
+            restorer.restore(sess, RESTORE_CKPT_PATH)
+        else:
+            # get variable
+            var = tf.global_variables()
+            # initial variables
+            init = tf.variables_initializer(var)
+            sess.run(init)
+
+        # setup saver
+        saver = tf.train.Saver(tf.global_variables(), max_to_keep=1000)
+        for i in range(1+RESTORE_TARGET, EPOCH):
+            print('Epoch {}'.format(i))
+            ix, iter_ = to_batch(False)
+            loss__ = 0
+            for j in range(iter_):
+                x_train_ = augmentation(x_train[ix[j]])
+                opt_, loss_ = sess.run([opt, loss],
+                                       feed_dict={xp: x_train_,
+                                       yp: y_train[ix[j]],
+                                       is_train: True,
+                                       global_step: i})
+                loss__ = loss__ + loss_*(np.size(ix[j])/iter_)
+            print('loss : {}'.format(loss__))
+            # test on validation set
+            print('Val acc:')
+            acc = eval_.compute_accuracy(xp, BATCH_SIZE, is_train, x_val,
+                                         y_val, prediction, sess)
+            if acc > best_acc:
+                best_acc = acc
+                best_epoch = i
+            if i % SAVE_STEP == 0:
+                saver.save(sess, BASEDIR + "/models/" + RESNET_V2 +
+                           "/model_" + str(i) + ".ckpt")
+    print("Best epoch:", best_epoch)
+    print("Best acc:", best_acc)
+
+
+def to_batch(pad=False):
+    if pad or SIZE % BATCH_SIZE == 0:
+        pad_size = SIZE % BATCH_SIZE
+        ix = np.random.permutation(SIZE)
+        ix = np.append(ix, np.random.choice(ix, pad_size))
+        iter_ = int((SIZE + pad_size)/BATCH_SIZE)
+        ix = np.array_split(ix, iter_)
+    else:
+        ix = np.random.permutation(SIZE)
+        iter_ = int(SIZE/BATCH_SIZE) + 1
+        ix = np.split(ix, [x*BATCH_SIZE for x in range(1, iter_)])
+    return ix, iter_
+
+
+def main():
+    # get data
+    x_train, y_train = load_data.load('train')
+    if ADD_VAL:
+        x_val, y_val = load_data.load('test')
+        x_train = np.append(x_train, x_val, axis=0)
+        y_train = np.append(y_train, y_val, axis=0)
+        x_val = crop_center(x_val)
+    else:
+        x_val, y_val = load_data.load('test')
+    global SIZE
+    SIZE = np.size(y_train)
+    # train network
+    train_net(x_train, y_train, x_val, y_val)
+
+
+if __name__ == '__main__':
+    main()

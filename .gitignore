@@ -1,3 +1,6 @@
 /dataset/
 /__pycache__/
 /models/
+/.ipynb_checkpoints/
+*.h5
+*.zip

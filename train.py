@@ -1,4 +1,5 @@
 import tensorflow as tf
+import tensorflow
 import random
 import numpy as np
 import os
@@ -7,6 +8,9 @@ import resnet
 import parser
 import load_data
 import eval_
+
+
+tf.disable_eager_execution()
 
 BASEDIR = os.path.join(os.path.dirname(__file__))
 
@@ -20,7 +24,7 @@ SPACE = 35
 # default: resnet_v2_101
 RESNET_V2 = 'resnet_v2_' + args.layers
 # default: ./pretrain_models/resnet_v2_101.ckpt'
-RESNET_V2_CKPT_PATH = BASEDIR+'/pretrain_models/'+RESNET_V2+'.ckpt'
+RESNET_V2_CKPT_PATH = os.path.join(BASEDIR,'pretrain_models/',RESNET_V2+'.ckpt')
 # default: 12
 CLASSES = args.classes
 # default: 16
@@ -189,15 +193,15 @@ def train_net(x_train, y_train, x_val, y_val):
                 loss__ = loss__ + loss_*(np.size(ix[j])/iter_)
             print('loss : {}'.format(loss__))
             # test on validation set
-            print('Val acc:')
             acc = eval_.compute_accuracy(xp, BATCH_SIZE, is_train, x_val,
                                          y_val, prediction, sess)
+            print('Val acc:', acc)
             if acc > best_acc:
                 best_acc = acc
                 best_epoch = i
             if i % SAVE_STEP == 0:
-                saver.save(sess, BASEDIR + "/models/" + RESNET_V2 +
-                           "/model_" + str(i) + ".ckpt")
+                saver.save(sess, os.path.join(BASEDIR, "/models/", RESNET_V2,
+                           "/model_" + str(i) + ".ckpt"))
     print("Best epoch:", best_epoch)
     print("Best acc:", best_acc)
 
